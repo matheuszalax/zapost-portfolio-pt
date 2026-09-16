@@ -1,0 +1,93 @@
+# Stack Multi-Serviço de Produção (Docker Compose)
+services:
+  # Servidor Web Principal (Next.js 16 em modo Standalone)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env.production
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_internal
+      - web_ingress
+
+  # Worker Dedicado em Background (Processamento de Filas BullMQ)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env.production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: []
+    command: ["node", "--import", "tsx", "src/workers/index.ts"]
+    networks:
+      - app_internal
+
+  # Banco de Dados Relacional Principal
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: zapost
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app_internal
+
+  # Cache em Memória, Filas e Semáforos de Concorrência
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - app_internal
+
+  # Túnel Seguro da Borda Cloudflare (Sem necessidade de portas abertas no firewall)
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - app_internal
+    depends_on:
+      - app
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  app_internal:
+    driver: bridge
+  web_ingress:
+    external: true
