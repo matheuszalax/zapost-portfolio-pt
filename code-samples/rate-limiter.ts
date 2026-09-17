@@ -1,15 +1,35 @@
 /**
- * Rate Limiter Distribuído por Janela Deslizante via Sorted Sets no Redis
- * 
- * Fornece limitação atômica de requisições para deploys multi-instância com
- * precisão de milissegundos, calculando o tempo exato de Retry-After em caso de excesso.
+ * Amostra de janela deslizante distribuída para Redis 7.
+ * A decisão de admitir, inserir e calcular a espera ocorre em uma execução Lua.
+ * Isto ilustra o algoritmo; não comprova a configuração do serviço privado.
  */
 
+import { randomUUID } from "node:crypto";
 import type { Redis } from "ioredis";
 
 export type RateLimitResult =
   | { allowed: true }
   | { allowed: false; retryAfterMs: number };
+
+const SLIDING_WINDOW_SCRIPT = `
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local windowMs = tonumber(ARGV[2])
+local member = ARGV[3]
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+
+-- A janela contém eventos com score > now - windowMs.
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - windowMs)
+if redis.call('ZCARD', key) >= limit then
+  local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+  return {0, math.max(1, tonumber(oldest[2]) + windowMs - now)}
+end
+
+redis.call('ZADD', key, now, member)
+redis.call('PEXPIRE', key, windowMs)
+return {1, 0}
+`;
 
 export async function checkSlidingWindowRateLimit(
   redis: Redis,
@@ -17,37 +37,22 @@ export async function checkSlidingWindowRateLimit(
   limit: number,
   windowMs: number
 ): Promise<RateLimitResult> {
-  const now = Date.now();
-  const windowStart = now - windowMs;
-  const redisKey = `ratelimit:${key}`;
-
-  // Executa pipeline atômico: limpa requisições expiradas e contabiliza eventos ativos
-  const results = await redis
-    .pipeline()
-    .zremrangebyscore(redisKey, 0, windowStart)
-    .zcard(redisKey)
-    .exec();
-
-  const currentCount = (results?.[1]?.[1] as number) ?? 0;
-
-  // Limite excedido: calcula o tempo exato até a requisição mais antiga sair da janela
-  if (currentCount >= limit) {
-    const oldestEntries = await redis.zrange(redisKey, 0, 0);
-    const oldestTimestamp = oldestEntries[0] 
-      ? parseInt(oldestEntries[0].split(":")[0], 10) 
-      : now;
-      
-    const retryAfterMs = Math.max(windowMs - (now - oldestTimestamp), 0);
-    return { allowed: false, retryAfterMs };
+  if (!key || !Number.isSafeInteger(limit) || limit <= 0 ||
+      !Number.isSafeInteger(windowMs) || windowMs <= 0) {
+    throw new RangeError("key, limit e windowMs devem ser válidos e positivos");
   }
 
-  // Dentro do limite: insere a requisição atual com identificador único e renova o TTL
-  const memberToken = `${now}:${Math.random().toString(36).slice(2, 9)}`;
-  await redis
-    .pipeline()
-    .zadd(redisKey, now, memberToken)
-    .pexpire(redisKey, windowMs)
-    .exec();
+  // UUID impede colisão entre chamadas no mesmo milissegundo e em instâncias diferentes.
+  const result = await redis.eval(
+    SLIDING_WINDOW_SCRIPT,
+    1,
+    `ratelimit:${key}`,
+    String(limit),
+    String(windowMs),
+    randomUUID()
+  ) as [number, number];
 
-  return { allowed: true };
+  return result[0] === 1
+    ? { allowed: true }
+    : { allowed: false, retryAfterMs: result[1] };
 }
