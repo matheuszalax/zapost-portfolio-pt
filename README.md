@@ -94,7 +94,7 @@ flowchart TD
 * **Container Dedicado de Worker:** Os processos em background rodam em um container isolado com runtime `tsx`, executando TypeScript diretamente sem necessidade de etapas extras de compilação.
 
 ### 3. Rate Limiting Distribuído & Controle de Concorrência
-* **Rate Limiter por Janela Deslizante (Sliding Window):** Protege endpoints sensíveis (autenticação, geração de IA, checkout) em deploys com múltiplas instâncias usando Redis Sorted Sets (`ZREMRANGEBYSCORE`, `ZCARD`, `ZADD`, `PEXPIRE`) em pipelines atômicos.
+* **Rate Limiter por Janela Deslizante (Sliding Window):** A amostra usa Redis Sorted Sets e uma execução Lua para decidir e registrar cada admissão atomicamente em múltiplas instâncias. O código público é demonstrativo e não comprova a configuração do serviço privado.
 * **Semáforo Distribuído de Concorrência:** Operações de alto custo (como regeração de legendas em tempo real) adquirem leases atômicos no Redis via `INCR`/`DECR` com TTL de proteção para evitar saturação de cotas dos modelos de IA.
 
 ### 4. Motor de IA Resiliente em 4 Camadas com Aterramento Web

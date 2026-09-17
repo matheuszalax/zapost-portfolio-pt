@@ -49,7 +49,7 @@ A plataforma opera com filas especializadas que possuem garantias de ciclo de vi
 
 ## 2. Rate Limiting Distribuído (Algoritmo de Janela Deslizante)
 
-Mecanismos de rate limit em memória (`Map` ou token bucket local) falham em ambientes com múltiplos containers. O zapost implementa um contador atômico de janela deslizante utilizando **Sorted Sets no Redis**:
+Mecanismos de rate limit em memória (`Map` ou token bucket local) não compartilham estado entre containers. A amostra pública mostra uma janela deslizante com **Sorted Sets no Redis** e um script Lua que executa a decisão e a inserção sem interleaving de outras requisições:
 
 ```
 Tempo (ms):       t - windowMs                agora (now)
@@ -66,7 +66,9 @@ Scores no Sorted Set: [ ●      ●      ●      ●    ● ]
 1. `ZREMRANGEBYSCORE`: Remove registros com timestamp inferior ao início da janela atual.
 2. `ZCARD`: Conta o número de requisições ativas dentro da janela.
 3. Se a contagem ultrapassar o limite, lê o evento mais antigo via `ZRANGE` para calcular o valor exato do header `Retry-After`.
-4. Se estiver dentro do limite, insere a requisição atual via `ZADD` e renova o TTL via `PEXPIRE` em um pipeline atômico.
+4. Se estiver dentro do limite, insere a requisição atual via `ZADD` e renova o TTL via `PEXPIRE` na mesma execução Lua.
+
+O tempo é lido no servidor Redis para evitar diferenças de relógio entre instâncias. A amostra não comprova o comportamento do serviço privado. Para reproduzir o teste, inicie Redis 7 em `127.0.0.1:16379`, execute `npm install` e `npm run test:rate-limit`. O teste dispara 40 chamadas simultâneas por oito clientes e exige exatamente cinco admissões.
 
 ---
 
